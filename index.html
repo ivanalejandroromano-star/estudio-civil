@@ -564,7 +564,9 @@
     <div style="font-family:'JetBrains Mono';font-size:11px;color:var(--blue)" id="worktimer"></div>
   </div>
 
-  <!-- Hint instalar como app -->
+  <div id="syncBanner" style="display:none;background:rgba(82,196,160,0.08);border:1px solid rgba(82,196,160,0.25);border-radius:8px;padding:10px 16px;margin-bottom:12px;align-items:center;gap:10px;font-size:12px;color:var(--green)">
+    <span>🔄</span> Sincronizando con Firebase…
+  </div>
   <div id="installHint" style="display:none;background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.25);border-radius:10px;padding:12px 16px;margin-bottom:14px;align-items:center;gap:10px">
     <span style="font-size:20px">📲</span>
     <div style="flex:1;font-size:12px"><strong style="color:var(--gold)">Instalá la app</strong><br><span style="color:var(--muted)">Usala desde el homescreen como una app nativa</span></div>
@@ -806,44 +808,511 @@
   </div>
 </div>
 
-<script>
+<script type="module">
+// ── FIREBASE ───────────────────────────────────────
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, onValue, set, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyB1NIEVwgwNEtXcLOMxs7U0HcF-4qsJNT8",
+  authDomain: "universidad-86fb5.firebaseapp.com",
+  projectId: "universidad-86fb5",
+  storageBucket: "universidad-86fb5.firebasestorage.app",
+  messagingSenderId: "923163007490",
+  appId: "1:923163007490:web:9c64dc7b63e64da301e51b",
+  databaseURL: "https://universidad-86fb5-default-rtdb.firebaseio.com"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+// ── Helpers Firebase ───────────────────────────────
+function fbSet(path, data) { return set(ref(db, path), data); }
+function fbDel(path)       { return remove(ref(db, path)); }
+function fbListen(path, cb){ onValue(ref(db, path), snap => cb(snap.val())); }
+
+// Convierte objeto Firebase {id1:{...}, id2:{...}} → array
+function toArray(obj) {
+  if(!obj) return [];
+  return Object.values(obj).sort((a,b)=> (b.id||0)-(a.id||0));
+}
+
 // ── DATA ──────────────────────────────────────────
 const MATERIAS = [
-  { id:1, nombre:"Ing. Legal",            dia:"Lunes",     color:"#c9a84c", icon:"⚖️"  },
-  { id:2, nombre:"Const. Metálicas/Madera",dia:"Martes",   color:"#5281e0", icon:"🏗️" },
-  { id:3, nombre:"Infraestructura Vial",   dia:"Miércoles",color:"#52c4a0", icon:"🛣️" },
-  { id:4, nombre:"Cimentaciones",          dia:"Jueves",   color:"#e09452", icon:"⛏️" },
-  { id:5, nombre:"Estructuras Hormigón",   dia:"Viernes",  color:"#e05252", icon:"🧱" },
-  { id:6, nombre:"Diseño Arq./Urbanismo",  dia:"Sábado",   color:"#a052e0", icon:"🏛️" },
+  { id:1, nombre:"Ing. Legal",             dia:"Lunes",     color:"#c9a84c", icon:"⚖️"  },
+  { id:2, nombre:"Const. Metálicas/Madera",dia:"Martes",    color:"#5281e0", icon:"🏗️" },
+  { id:3, nombre:"Infraestructura Vial",   dia:"Miércoles", color:"#52c4a0", icon:"🛣️" },
+  { id:4, nombre:"Cimentaciones",          dia:"Jueves",    color:"#e09452", icon:"⛏️" },
+  { id:5, nombre:"Estructuras Hormigón",   dia:"Viernes",   color:"#e05252", icon:"🧱" },
+  { id:6, nombre:"Diseño Arq./Urbanismo",  dia:"Sábado",    color:"#a052e0", icon:"🏛️" },
 ];
 
 const DIAS_SEMANA = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
-const DIAS_SHORT  = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
 
-// LocalStorage helpers
-function load(key, def) {
-  try { return JSON.parse(localStorage.getItem(key)) || def; } catch { return def; }
-}
-function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
-
-let tps    = load('tps',   []);
-let notas  = load('notas', []);
+let tps    = [];
+let notas  = [];
+let recordatorios = [];
 let editingNota = null;
+
+// ── SYNC EN TIEMPO REAL ────────────────────────────
+function initFirebase() {
+  mostrarSyncBanner(true);
+
+  fbListen('tps', data => {
+    tps = toArray(data);
+    buildTPList(); buildStats(); buildProximas(); buildProgreso();
+    mostrarSyncBanner(false);
+  });
+
+  fbListen('notas', data => {
+    notas = toArray(data);
+    buildNotas(); buildStats();
+  });
+
+  fbListen('recordatorios', data => {
+    recordatorios = toArray(data);
+    buildRecGrid();
+    startAllTimers();
+  });
+}
+
+// ── SAVE helpers (escribe a Firebase) ─────────────
+function saveTP(tp)   { fbSet('tps/'+tp.id, tp); }
+function saveNota_(n) { fbSet('notas/'+n.id, n); }
+function saveRec(r)   { fbSet('recordatorios/'+r.id, r); }
+
+// ── SYNC BANNER ───────────────────────────────────
+function mostrarSyncBanner(on) {
+  let el = document.getElementById('syncBanner');
+  if(!el) return;
+  el.style.display = on ? 'flex' : 'none';
+}
 
 // ── INIT ──────────────────────────────────────────
 function init() {
   updateDate();
   buildWeekBanner();
-  buildStats();
-  buildProximas();
-  buildProgreso();
   buildAgenda();
-  buildTPList();
-  buildNotas();
   populateMateriaSelects();
   setInterval(updateWorkTimer, 1000);
   updateWorkTimer();
+  initFirebase();
 }
+
+function updateDate() {
+  const now = new Date();
+  document.getElementById('navDate').textContent =
+    DIAS_SEMANA[now.getDay()] + ' ' + now.toLocaleDateString('es-AR');
+}
+
+// ── NAV ───────────────────────────────────────────
+const FAB_SECTIONS = { tps:'toggleAddForm', notas:'openNotaModal', recordatorios:'toggleRecForm' };
+let currentSection = 'dashboard';
+
+window.goto = function(sec, el) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.bn-item').forEach(t => t.classList.remove('active'));
+  document.getElementById('sec-'+sec).classList.add('active');
+  const bn = document.getElementById('bn-'+sec);
+  if(bn) bn.classList.add('active');
+  const fab = document.getElementById('fab');
+  if(FAB_SECTIONS[sec]) fab.classList.remove('hidden');
+  else fab.classList.add('hidden');
+  currentSection = sec;
+}
+
+window.fabAction = function() {
+  const fn = FAB_SECTIONS[currentSection];
+  if(fn && window[fn]) window[fn]();
+}
+
+// ── WEEK BANNER ───────────────────────────────────
+function buildWeekBanner() {
+  const hoy = new Date().getDay();
+  const container = document.getElementById('weekBanner');
+  container.innerHTML = '';
+  MATERIAS.forEach((m,i) => {
+    const isHoy = hoy === i+1;
+    const chip = document.createElement('div');
+    chip.className = 'day-chip'+(isHoy?' today':'');
+    chip.style.setProperty('--color', m.color);
+    chip.innerHTML = `<div class="dia">${m.dia}</div>
+      <div class="materia">${m.icon} ${m.nombre}</div>
+      <div class="hora">Tarde · Facultad</div>`;
+    container.appendChild(chip);
+  });
+}
+
+// ── STATS ─────────────────────────────────────────
+function buildStats() {
+  const pendientes = tps.filter(t=>!t.done).length;
+  const urgentes   = tps.filter(t=>!t.done && diasPara(t.fecha)<=3).length;
+  const hechos     = tps.filter(t=>t.done).length;
+  document.getElementById('statsRow').innerHTML = `
+    <div class="stat-pill"><div class="num" style="color:var(--orange)">${pendientes}</div><div class="lbl">TPs<br>pendientes</div></div>
+    <div class="stat-pill"><div class="num" style="color:var(--red)">${urgentes}</div><div class="lbl">Urgentes<br>(≤3 días)</div></div>
+    <div class="stat-pill"><div class="num" style="color:var(--green)">${hechos}</div><div class="lbl">Entregados</div></div>
+    <div class="stat-pill"><div class="num" style="color:var(--gold)">6</div><div class="lbl">Materias</div></div>
+    <div class="stat-pill"><div class="num" style="color:var(--blue)">${notas.length}</div><div class="lbl">Notas</div></div>`;
+}
+
+// ── PROXIMAS ──────────────────────────────────────
+function diasPara(fecha) {
+  if(!fecha) return 999;
+  const hoy = new Date(); hoy.setHours(0,0,0,0);
+  return Math.ceil((new Date(fecha+'T00:00:00')-hoy)/(1000*60*60*24));
+}
+function buildProximas() {
+  const pendientes = tps.filter(t=>!t.done&&t.fecha)
+    .sort((a,b)=>new Date(a.fecha)-new Date(b.fecha)).slice(0,5);
+  const el = document.getElementById('proximasEntregas');
+  if(!pendientes.length){ el.innerHTML='<div class="empty"><span>🎉</span>Sin entregas pendientes</div>'; return; }
+  el.innerHTML = pendientes.map(t=>{
+    const m = MATERIAS.find(x=>x.id===t.materiaId)||{color:'#666',nombre:''};
+    const d = diasPara(t.fecha);
+    let badge,bc;
+    if(d<0){badge='Vencido';bc='badge-urgent';}
+    else if(d===0){badge='¡Hoy!';bc='badge-urgent';}
+    else if(d<=3){badge=d+'d';bc='badge-urgent';}
+    else if(d<=7){badge=d+'d';bc='badge-prox';}
+    else{badge=d+'d';bc='badge-ok';}
+    return `<div class="task-item">
+      <div class="task-dot" style="background:${m.color}"></div>
+      <div class="task-body">
+        <div class="task-name">${t.nombre}</div>
+        <div class="task-meta">${m.nombre} · ${t.tipo||'TP'} · ${formatFecha(t.fecha)}</div>
+      </div>
+      <div class="task-badge ${bc}">${badge}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── PROGRESO ──────────────────────────────────────
+function buildProgreso() {
+  document.getElementById('progMateria').innerHTML = MATERIAS.map(m=>{
+    const total = tps.filter(t=>t.materiaId===m.id).length;
+    const done  = tps.filter(t=>t.materiaId===m.id&&t.done).length;
+    const pct   = total ? Math.round(done/total*100) : 0;
+    return `<div style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+        <span>${m.icon} ${m.nombre}</span>
+        <span style="color:var(--muted);font-family:'JetBrains Mono'">${done}/${total}</span>
+      </div>
+      <div class="prog-bar"><div class="prog-fill" style="width:${pct}%;background:${m.color}"></div></div>
+    </div>`;
+  }).join('');
+}
+
+// ── AGENDA ────────────────────────────────────────
+function buildAgenda() {
+  const hoyIdx = new Date().getDay();
+  const dias = [
+    {idx:1,label:'Lunes',    extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Ing. Legal – Facultad',color:'#c9a84c',tag:'⚖️'}]},
+    {idx:2,label:'Martes',   extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Const. Metálicas/Madera',color:'#5281e0',tag:'🔩'}]},
+    {idx:3,label:'Miércoles',extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Infraestructura Vial',color:'#52c4a0',tag:'🛣️'}]},
+    {idx:4,label:'Jueves',   extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Cimentaciones',color:'#e09452',tag:'⛏️'}]},
+    {idx:5,label:'Viernes',  extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Estructuras Hormigón',color:'#e05252',tag:'🧱'}]},
+    {idx:6,label:'Sábado',   extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Diseño Arq./Urbanismo',color:'#a052e0',tag:'🏛️'}]},
+    {idx:0,label:'Domingo',  extras:[{t:'Todo el día',txt:'Descanso / Repaso libre',color:'#52c4a0',tag:'✨'}]},
+  ];
+  document.getElementById('agendaContent').innerHTML = dias.map(d=>{
+    const isHoy = d.idx===hoyIdx;
+    return `<div class="agenda-day">
+      <div class="agenda-header">
+        <div class="dname ${isHoy?'hoy':''}">${isHoy?'▸ ':''} ${d.label.toUpperCase()} ${isHoy?'— HOY':''}</div>
+        <div class="agenda-line"></div>
+      </div>
+      <div class="agenda-blocks">${d.extras.map(b=>`
+        <div class="block" style="--color:${b.color}">
+          <div class="btime">${b.t}</div>
+          <div class="btext">${b.txt}</div>
+          <div class="btag">${b.tag}</div>
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── TPs ───────────────────────────────────────────
+window.toggleAddForm = function() { document.getElementById('addForm').classList.toggle('open'); }
+
+window.addTP = function() {
+  const nombre = document.getElementById('tpNombre').value.trim();
+  const mid    = parseInt(document.getElementById('tpMateria').value);
+  const fecha  = document.getElementById('tpFecha').value;
+  const tipo   = document.getElementById('tpTipo').value;
+  if(!nombre) return;
+  const tp = { id:Date.now(), nombre, materiaId:mid||null, fecha, tipo, done:false };
+  saveTP(tp);
+  ['tpNombre','tpFecha'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('addForm').classList.remove('open');
+}
+
+window.toggleDone = function(id) {
+  const t = tps.find(x=>x.id===id);
+  if(t){ t.done=!t.done; saveTP(t); }
+}
+
+window.deleteTP = function(id) { fbDel('tps/'+id); }
+
+function buildTPList() {
+  const el = document.getElementById('tpList');
+  if(!tps.length){ el.innerHTML='<div class="empty"><span>📋</span>No hay TPs cargados.</div>'; return; }
+  const sorted = [...tps].sort((a,b)=>{ if(a.done!==b.done) return a.done?1:-1; return new Date(a.fecha)-new Date(b.fecha); });
+  el.innerHTML = sorted.map(t=>{
+    const m = MATERIAS.find(x=>x.id===t.materiaId)||{color:'#555',nombre:''};
+    const d = diasPara(t.fecha);
+    let badge='',bc='';
+    if(!t.done){
+      if(d<0){badge='Vencido';bc='badge-urgent';}
+      else if(d===0){badge='¡Hoy!';bc='badge-urgent';}
+      else if(d<=3){badge=d+'d';bc='badge-urgent';}
+      else if(d<=7){badge=d+'d';bc='badge-prox';}
+      else{badge=d+'d';bc='badge-ok';}
+    } else{badge='Listo';bc='badge-done';}
+    return `<div class="task-item" style="${t.done?'opacity:.55':''}">
+      <div class="task-check ${t.done?'checked':''}" onclick="toggleDone(${t.id})"></div>
+      <div class="task-dot" style="background:${m.color}"></div>
+      <div class="task-body">
+        <div class="task-name" style="${t.done?'text-decoration:line-through;color:var(--muted)':''}">${t.nombre}</div>
+        <div class="task-meta">${m.nombre} · ${t.tipo||'TP'}${t.fecha?' · '+formatFecha(t.fecha):''}</div>
+      </div>
+      <div class="task-badge ${bc}">${badge}</div>
+      <button onclick="deleteTP(${t.id})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px">×</button>
+    </div>`;
+  }).join('');
+}
+
+// ── NOTAS ─────────────────────────────────────────
+function populateMateriaSelects() {
+  const opts = MATERIAS.map(m=>`<option value="${m.id}">${m.icon} ${m.nombre}</option>`).join('');
+  ['tpMateria','notaMateria'].forEach(id=>{
+    const sel = document.getElementById(id);
+    if(sel) sel.innerHTML = sel.innerHTML.split('</option>')[0]+'</option>'+opts;
+  });
+}
+
+let filtroNota = null;
+function buildNotaFiltros() {
+  document.getElementById('notaFiltros').innerHTML =
+    `<button class="btn btn-sm ${filtroNota===null?'btn-gold':'btn-ghost'}" onclick="setFiltroNota(null)">Todas</button>`
+    + MATERIAS.map(m=>`<button class="btn btn-sm btn-ghost" onclick="setFiltroNota(${m.id})"
+        style="${filtroNota===m.id?'border-color:'+m.color+';color:'+m.color:''}">${m.icon} ${m.nombre.split(' ')[0]}</button>`).join('');
+}
+window.setFiltroNota = function(id){ filtroNota=id; buildNotas(); }
+
+function buildNotas() {
+  buildNotaFiltros();
+  const filtered = filtroNota ? notas.filter(n=>n.materiaId===filtroNota) : notas;
+  const el = document.getElementById('notasGrid');
+  if(!filtered.length){ el.innerHTML='<div class="empty" style="grid-column:1/-1"><span>📝</span>Sin notas.</div>'; return; }
+  el.innerHTML = filtered.map(n=>{
+    const m = MATERIAS.find(x=>x.id===n.materiaId)||{color:'#555',nombre:'General'};
+    return `<div class="nota-card" style="--color:${m.color}" onclick="openNotaModal(${n.id})">
+      <div class="nmat">${m.nombre}</div>
+      <div class="ntitle">${n.titulo||'Sin título'}</div>
+      <div class="nbody">${n.cuerpo||''}</div>
+      <div class="ndate">${n.fecha||''}</div>
+    </div>`;
+  }).join('');
+}
+
+window.openNotaModal = function(id=null) {
+  editingNota = id;
+  const n = id ? notas.find(x=>x.id===id) : null;
+  document.getElementById('modalTitle').textContent = n ? 'Editar Nota' : 'Nueva Nota';
+  document.getElementById('notaTitulo').value = n?.titulo||'';
+  document.getElementById('notaMateria').value = n?.materiaId||'';
+  document.getElementById('notaCuerpo').value  = n?.cuerpo||'';
+  document.getElementById('btnDeleteNota').style.display = n?'':'none';
+  document.getElementById('modalOverlay').classList.add('open');
+}
+window.closeModal = function() { document.getElementById('modalOverlay').classList.remove('open'); editingNota=null; }
+
+window.saveNota = function() {
+  const titulo = document.getElementById('notaTitulo').value.trim();
+  const mid    = parseInt(document.getElementById('notaMateria').value)||null;
+  const cuerpo = document.getElementById('notaCuerpo').value.trim();
+  if(!titulo && !cuerpo) return;
+  const fecha = new Date().toLocaleDateString('es-AR');
+  const id = editingNota || Date.now();
+  saveNota_({id, titulo, materiaId:mid, cuerpo, fecha});
+  closeModal();
+}
+window.deleteNota = function() {
+  if(!editingNota) return;
+  fbDel('notas/'+editingNota);
+  closeModal();
+}
+
+// ── WORK TIMER ────────────────────────────────────
+function updateWorkTimer() {
+  const now=new Date(), h=now.getHours(), m=now.getMinutes(), day=now.getDay();
+  const el=document.getElementById('worktimer'); if(!el) return;
+  if(day===0){el.textContent='Día libre';return;}
+  if(h<8){const mins=(8-h)*60-m;el.textContent=`Trabajo en ${Math.floor(mins/60)}h ${mins%60}m`;}
+  else if(h<13){const mins=(13-h)*60-m;el.textContent=`Fin trabajo: ${Math.floor(mins/60)}h ${mins%60}m`;}
+  else{el.textContent='Turno terminado ✓';}
+}
+
+// ── HELPERS ───────────────────────────────────────
+function formatFecha(f) {
+  if(!f) return '';
+  const [y,mo,d] = f.split('-');
+  return `${d}/${mo}/${y}`;
+}
+
+// ── RECORDATORIOS ─────────────────────────────────
+let recIntervals = {};
+
+function initRecordatorios() {
+  populateRecMateriaSelect();
+  checkNotifPermission();
+  document.getElementById('recRepeat').addEventListener('change', function(){
+    document.getElementById('diasCheck').style.display = this.value==='personalizado'?'flex':'none';
+  });
+}
+
+function populateRecMateriaSelect() {
+  const sel = document.getElementById('recMateria');
+  if(!sel) return;
+  sel.innerHTML = '<option value="">— Materia (opcional) —</option>'
+    + MATERIAS.map(m=>`<option value="${m.id}">${m.icon} ${m.nombre}</option>`).join('');
+}
+
+function checkNotifPermission() {
+  if('Notification' in window && Notification.permission==='default')
+    document.getElementById('permBanner').style.display='flex';
+}
+
+window.pedirPermiso = function() {
+  Notification.requestPermission().then(p=>{
+    document.getElementById('permBanner').style.display='none';
+    if(p==='granted') mostrarBanner('🔔 Activadas','Vas a recibir tus recordatorios');
+  });
+}
+
+window.toggleRecForm = function() { document.getElementById('recForm').classList.toggle('open'); }
+
+window.addRecordatorio = function() {
+  const msg    = document.getElementById('recMsg').value.trim();
+  const hora   = document.getElementById('recHora').value;
+  const repeat = document.getElementById('recRepeat').value;
+  const mid    = parseInt(document.getElementById('recMateria').value)||null;
+  if(!msg||!hora) return;
+  let dias=[];
+  if(repeat==='diario')     dias=[0,1,2,3,4,5,6];
+  else if(repeat==='laborable') dias=[1,2,3,4,5,6];
+  else if(repeat==='unico') dias=[new Date().getDay()];
+  else {
+    document.querySelectorAll('#diasCheck input:checked').forEach(cb=>dias.push(parseInt(cb.value)));
+    if(!dias.length){alert('Seleccioná al menos un día');return;}
+  }
+  const rec={id:Date.now(),msg,hora,dias,repeat,materiaId:mid,activo:true};
+  saveRec(rec);
+  document.getElementById('recMsg').value='';
+  document.getElementById('recForm').classList.remove('open');
+}
+
+window.deleteRec = function(id) { fbDel('recordatorios/'+id); clearInterval(recIntervals[id]); }
+
+window.toggleRec = function(id) {
+  const r=recordatorios.find(x=>x.id===id);
+  if(!r) return;
+  r.activo=!r.activo; saveRec(r);
+}
+
+function buildRecGrid() {
+  const el=document.getElementById('recGrid');
+  if(!el) return;
+  if(!recordatorios.length){el.innerHTML='<div class="empty"><span>🔔</span>Sin recordatorios.</div>';return;}
+  el.innerHTML=recordatorios.map(r=>{
+    const m=r.materiaId?MATERIAS.find(x=>x.id===r.materiaId):null;
+    const color=m?m.color:'var(--gold)';
+    const diasLabel={diario:'Todos los días',laborable:'Lun–Sáb',unico:'Una vez',
+      personalizado:(r.dias||[]).map(d=>['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][d]).join(', ')}[r.repeat]||'';
+    return `<div class="rec-card" style="--color:${color}">
+      <div class="rc-header"><div class="rc-time">⏰ ${r.hora}</div><div class="rc-dias">${diasLabel}</div></div>
+      <div class="rc-msg">${r.msg}</div>
+      ${m?`<div class="rc-mat">${m.icon} ${m.nombre}</div>`:''}
+      <div class="rc-actions">
+        <button class="rc-toggle ${r.activo?'on':''}" onclick="toggleRec(${r.id})">${r.activo?'✓ Activo':'Pausado'}</button>
+        <button class="rc-del" onclick="deleteRec(${r.id})">Eliminar</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function startAllTimers() { recordatorios.forEach(r=>{if(r.activo)startTimer(r);}); }
+function startTimer(rec) {
+  clearInterval(recIntervals[rec.id]);
+  recIntervals[rec.id]=setInterval(()=>checkFire(rec),15000);
+  checkFire(rec);
+}
+function checkFire(rec) {
+  if(!rec.activo) return;
+  const now=new Date(), hoy=now.getDay();
+  const hhmm=now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
+  if(!(rec.dias||[]).includes(hoy)||hhmm!==rec.hora) return;
+  const key='fired_'+rec.id+'_'+hhmm;
+  if(sessionStorage.getItem(key)) return;
+  sessionStorage.setItem(key,'1');
+  const m=rec.materiaId?MATERIAS.find(x=>x.id===rec.materiaId):null;
+  dispararNotif(m?`${m.icon} ${m.nombre}`:'📚 Recordatorio', rec.msg);
+  if(rec.repeat==='unico'){rec.activo=false;saveRec(rec);}
+}
+function dispararNotif(titulo,cuerpo) {
+  mostrarBanner(titulo,cuerpo);
+  if('Notification' in window&&Notification.permission==='granted')
+    new Notification(titulo,{body:cuerpo});
+}
+function mostrarBanner(titulo,cuerpo) {
+  document.getElementById('notifTitle').textContent=titulo;
+  document.getElementById('notifBody').textContent=cuerpo;
+  const b=document.getElementById('notifBanner');
+  b.classList.add('show'); setTimeout(()=>b.classList.remove('show'),6000);
+}
+window.cerrarBanner = function() { document.getElementById('notifBanner').classList.remove('show'); }
+
+// ── IA (sin cambios) ──────────────────────────────
+window.checkApiKey = function(){}; // deshabilitada
+function initIA(){}
+
+// ── PWA ───────────────────────────────────────────
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt',e=>{
+  e.preventDefault(); deferredPrompt=e;
+  const hint=document.getElementById('installHint');
+  if(hint) hint.style.display='flex';
+});
+window.instalarPWA = function(){
+  if(!deferredPrompt) return;
+  deferredPrompt.prompt();
+  deferredPrompt.userChoice.then(()=>{deferredPrompt=null;document.getElementById('installHint').style.display='none';});
+}
+
+// ── SWIPE ─────────────────────────────────────────
+(function(){
+  const SECTIONS=['dashboard','agenda','tps','notas','recordatorios'];
+  let touchX=0;
+  document.addEventListener('touchstart',e=>{touchX=e.touches[0].clientX;},{passive:true});
+  document.addEventListener('touchend',e=>{
+    const dx=e.changedTouches[0].clientX-touchX;
+    if(Math.abs(dx)<60) return;
+    const idx=SECTIONS.indexOf(currentSection);
+    if(dx<0&&idx<SECTIONS.length-1) goto(SECTIONS[idx+1]);
+    if(dx>0&&idx>0) goto(SECTIONS[idx-1]);
+  },{passive:true});
+})();
+
+// ── START ─────────────────────────────────────────
+init();
+initRecordatorios();
+
+
+</script>
+</body>
+</html>
 
 function updateDate() {
   const now = new Date();
