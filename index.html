@@ -809,7 +809,7 @@
 </div>
 
 <script type="module">
-// ── FIREBASE ───────────────────────────────────────
+// ── FIREBASE SDK ──────────────────────────────────
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getDatabase, ref, onValue, set, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
@@ -822,1146 +822,287 @@ const firebaseConfig = {
   appId: "1:923163007490:web:9c64dc7b63e64da301e51b",
   databaseURL: "https://universidad-86fb5-default-rtdb.firebaseio.com"
 };
+const fbApp = initializeApp(firebaseConfig);
+const db    = getDatabase(fbApp);
 
-const app = initializeApp(firebaseConfig);
-const db  = getDatabase(app);
-
-// ── Helpers Firebase ───────────────────────────────
 function fbSet(path, data) { return set(ref(db, path), data); }
 function fbDel(path)       { return remove(ref(db, path)); }
-function fbListen(path, cb){ onValue(ref(db, path), snap => cb(snap.val())); }
+function fbOn(path, cb)    { onValue(ref(db, path), snap => cb(snap.val())); }
+function toArr(obj)        { return obj ? Object.values(obj).sort((a,b)=>(b.id||0)-(a.id||0)) : []; }
 
-// Convierte objeto Firebase {id1:{...}, id2:{...}} → array
-function toArray(obj) {
-  if(!obj) return [];
-  return Object.values(obj).sort((a,b)=> (b.id||0)-(a.id||0));
-}
-
-// ── DATA ──────────────────────────────────────────
+// ── CONSTANTES ────────────────────────────────────
 const MATERIAS = [
-  { id:1, nombre:"Ing. Legal",             dia:"Lunes",     color:"#c9a84c", icon:"⚖️"  },
-  { id:2, nombre:"Const. Metálicas/Madera",dia:"Martes",    color:"#5281e0", icon:"🏗️" },
-  { id:3, nombre:"Infraestructura Vial",   dia:"Miércoles", color:"#52c4a0", icon:"🛣️" },
-  { id:4, nombre:"Cimentaciones",          dia:"Jueves",    color:"#e09452", icon:"⛏️" },
-  { id:5, nombre:"Estructuras Hormigón",   dia:"Viernes",   color:"#e05252", icon:"🧱" },
-  { id:6, nombre:"Diseño Arq./Urbanismo",  dia:"Sábado",    color:"#a052e0", icon:"🏛️" },
+  {id:1, nombre:"Ing. Legal",             dia:"Lunes",     color:"#c9a84c", icon:"⚖️"},
+  {id:2, nombre:"Const. Metálicas/Madera",dia:"Martes",    color:"#5281e0", icon:"🏗️"},
+  {id:3, nombre:"Infraestructura Vial",   dia:"Miércoles", color:"#52c4a0", icon:"🛣️"},
+  {id:4, nombre:"Cimentaciones",          dia:"Jueves",    color:"#e09452", icon:"⛏️"},
+  {id:5, nombre:"Estructuras Hormigón",   dia:"Viernes",   color:"#e05252", icon:"🧱"},
+  {id:6, nombre:"Diseño Arq./Urbanismo",  dia:"Sábado",    color:"#a052e0", icon:"🏛️"},
 ];
+const DIAS = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
 
-const DIAS_SEMANA = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+// ── ESTADO ────────────────────────────────────────
+let tps=[], notas=[], recordatorios=[], editingNota=null, recIntervals={}, currentSection='dashboard';
 
-let tps    = [];
-let notas  = [];
-let recordatorios = [];
-let editingNota = null;
-
-// ── SYNC EN TIEMPO REAL ────────────────────────────
+// ── FIREBASE LISTENERS (tiempo real) ──────────────
 function initFirebase() {
-  mostrarSyncBanner(true);
-
-  fbListen('tps', data => {
-    tps = toArray(data);
-    buildTPList(); buildStats(); buildProximas(); buildProgreso();
-    mostrarSyncBanner(false);
-  });
-
-  fbListen('notas', data => {
-    notas = toArray(data);
-    buildNotas(); buildStats();
-  });
-
-  fbListen('recordatorios', data => {
-    recordatorios = toArray(data);
-    buildRecGrid();
-    startAllTimers();
-  });
+  setSyncBanner(true);
+  fbOn('tps', d => { tps=toArr(d); renderTPList(); renderStats(); renderProximas(); renderProgreso(); setSyncBanner(false); });
+  fbOn('notas', d => { notas=toArr(d); renderNotas(); renderStats(); });
+  fbOn('recordatorios', d => { recordatorios=toArr(d); renderRecGrid(); startAllTimers(); });
 }
-
-// ── SAVE helpers (escribe a Firebase) ─────────────
-function saveTP(tp)   { fbSet('tps/'+tp.id, tp); }
-function saveNota_(n) { fbSet('notas/'+n.id, n); }
-function saveRec(r)   { fbSet('recordatorios/'+r.id, r); }
-
-// ── SYNC BANNER ───────────────────────────────────
-function mostrarSyncBanner(on) {
-  let el = document.getElementById('syncBanner');
-  if(!el) return;
-  el.style.display = on ? 'flex' : 'none';
+function setSyncBanner(on) {
+  const el=document.getElementById('syncBanner'); if(el) el.style.display=on?'flex':'none';
 }
 
 // ── INIT ──────────────────────────────────────────
 function init() {
-  updateDate();
-  buildWeekBanner();
-  buildAgenda();
-  populateMateriaSelects();
-  setInterval(updateWorkTimer, 1000);
-  updateWorkTimer();
+  document.getElementById('navDate').textContent = DIAS[new Date().getDay()] + ' ' + new Date().toLocaleDateString('es-AR');
+  renderWeekBanner();
+  renderAgenda();
+  fillSelects();
+  setInterval(tickWorkTimer, 1000);
+  tickWorkTimer();
+  checkNotifPermission();
+  document.getElementById('recRepeat').addEventListener('change', function(){
+    document.getElementById('diasCheck').style.display = this.value==='personalizado'?'flex':'none';
+  });
   initFirebase();
 }
 
-function updateDate() {
-  const now = new Date();
-  document.getElementById('navDate').textContent =
-    DIAS_SEMANA[now.getDay()] + ' ' + now.toLocaleDateString('es-AR');
-}
-
 // ── NAV ───────────────────────────────────────────
-const FAB_SECTIONS = { tps:'toggleAddForm', notas:'openNotaModal', recordatorios:'toggleRecForm' };
-let currentSection = 'dashboard';
+const FAB_MAP = {tps:'toggleAddForm', notas:'openNotaModal', recordatorios:'toggleRecForm'};
 
-window.goto = function(sec, el) {
-  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  document.querySelectorAll('.bn-item').forEach(t => t.classList.remove('active'));
+window.goto = function(sec) {
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.bn-item').forEach(t=>t.classList.remove('active'));
   document.getElementById('sec-'+sec).classList.add('active');
-  const bn = document.getElementById('bn-'+sec);
-  if(bn) bn.classList.add('active');
-  const fab = document.getElementById('fab');
-  if(FAB_SECTIONS[sec]) fab.classList.remove('hidden');
-  else fab.classList.add('hidden');
-  currentSection = sec;
-}
+  const bn=document.getElementById('bn-'+sec); if(bn) bn.classList.add('active');
+  const fab=document.getElementById('fab');
+  fab.classList.toggle('hidden', !FAB_MAP[sec]);
+  currentSection=sec;
+};
+window.fabAction = () => { const fn=FAB_MAP[currentSection]; if(fn&&window[fn]) window[fn](); };
 
-window.fabAction = function() {
-  const fn = FAB_SECTIONS[currentSection];
-  if(fn && window[fn]) window[fn]();
-}
+// Swipe
+(()=>{
+  let tx=0;
+  const S=['dashboard','agenda','tps','notas','recordatorios'];
+  document.addEventListener('touchstart',e=>{tx=e.touches[0].clientX;},{passive:true});
+  document.addEventListener('touchend',e=>{
+    const dx=e.changedTouches[0].clientX-tx;
+    if(Math.abs(dx)<60) return;
+    const i=S.indexOf(currentSection);
+    if(dx<0&&i<S.length-1) goto(S[i+1]);
+    if(dx>0&&i>0) goto(S[i-1]);
+  },{passive:true});
+})();
 
 // ── WEEK BANNER ───────────────────────────────────
-function buildWeekBanner() {
-  const hoy = new Date().getDay();
-  const container = document.getElementById('weekBanner');
-  container.innerHTML = '';
-  MATERIAS.forEach((m,i) => {
-    const isHoy = hoy === i+1;
-    const chip = document.createElement('div');
-    chip.className = 'day-chip'+(isHoy?' today':'');
-    chip.style.setProperty('--color', m.color);
-    chip.innerHTML = `<div class="dia">${m.dia}</div>
-      <div class="materia">${m.icon} ${m.nombre}</div>
-      <div class="hora">Tarde · Facultad</div>`;
-    container.appendChild(chip);
+function renderWeekBanner() {
+  const hoy=new Date().getDay(), c=document.getElementById('weekBanner');
+  c.innerHTML='';
+  MATERIAS.forEach((m,i)=>{
+    const isHoy=hoy===i+1, div=document.createElement('div');
+    div.className='day-chip'+(isHoy?' today':'');
+    div.style.setProperty('--color',m.color);
+    div.innerHTML=`<div class="dia">${m.dia}</div><div class="materia">${m.icon} ${m.nombre}</div><div class="hora">Tarde · Facultad</div>`;
+    c.appendChild(div);
   });
 }
 
 // ── STATS ─────────────────────────────────────────
-function buildStats() {
-  const pendientes = tps.filter(t=>!t.done).length;
-  const urgentes   = tps.filter(t=>!t.done && diasPara(t.fecha)<=3).length;
-  const hechos     = tps.filter(t=>t.done).length;
-  document.getElementById('statsRow').innerHTML = `
-    <div class="stat-pill"><div class="num" style="color:var(--orange)">${pendientes}</div><div class="lbl">TPs<br>pendientes</div></div>
-    <div class="stat-pill"><div class="num" style="color:var(--red)">${urgentes}</div><div class="lbl">Urgentes<br>(≤3 días)</div></div>
-    <div class="stat-pill"><div class="num" style="color:var(--green)">${hechos}</div><div class="lbl">Entregados</div></div>
+function renderStats() {
+  const pend=tps.filter(t=>!t.done).length, urg=tps.filter(t=>!t.done&&diasPara(t.fecha)<=3).length, done=tps.filter(t=>t.done).length;
+  document.getElementById('statsRow').innerHTML=`
+    <div class="stat-pill"><div class="num" style="color:var(--orange)">${pend}</div><div class="lbl">TPs<br>pendientes</div></div>
+    <div class="stat-pill"><div class="num" style="color:var(--red)">${urg}</div><div class="lbl">Urgentes<br>(≤3 días)</div></div>
+    <div class="stat-pill"><div class="num" style="color:var(--green)">${done}</div><div class="lbl">Entregados</div></div>
     <div class="stat-pill"><div class="num" style="color:var(--gold)">6</div><div class="lbl">Materias</div></div>
     <div class="stat-pill"><div class="num" style="color:var(--blue)">${notas.length}</div><div class="lbl">Notas</div></div>`;
 }
 
 // ── PROXIMAS ──────────────────────────────────────
-function diasPara(fecha) {
-  if(!fecha) return 999;
-  const hoy = new Date(); hoy.setHours(0,0,0,0);
-  return Math.ceil((new Date(fecha+'T00:00:00')-hoy)/(1000*60*60*24));
-}
-function buildProximas() {
-  const pendientes = tps.filter(t=>!t.done&&t.fecha)
-    .sort((a,b)=>new Date(a.fecha)-new Date(b.fecha)).slice(0,5);
-  const el = document.getElementById('proximasEntregas');
-  if(!pendientes.length){ el.innerHTML='<div class="empty"><span>🎉</span>Sin entregas pendientes</div>'; return; }
-  el.innerHTML = pendientes.map(t=>{
-    const m = MATERIAS.find(x=>x.id===t.materiaId)||{color:'#666',nombre:''};
-    const d = diasPara(t.fecha);
-    let badge,bc;
-    if(d<0){badge='Vencido';bc='badge-urgent';}
-    else if(d===0){badge='¡Hoy!';bc='badge-urgent';}
-    else if(d<=3){badge=d+'d';bc='badge-urgent';}
-    else if(d<=7){badge=d+'d';bc='badge-prox';}
-    else{badge=d+'d';bc='badge-ok';}
-    return `<div class="task-item">
-      <div class="task-dot" style="background:${m.color}"></div>
-      <div class="task-body">
-        <div class="task-name">${t.nombre}</div>
-        <div class="task-meta">${m.nombre} · ${t.tipo||'TP'} · ${formatFecha(t.fecha)}</div>
-      </div>
-      <div class="task-badge ${bc}">${badge}</div>
-    </div>`;
+function diasPara(f){ if(!f) return 999; const h=new Date(); h.setHours(0,0,0,0); return Math.ceil((new Date(f+'T00:00:00')-h)/86400000); }
+function fmtFecha(f){ if(!f) return ''; const[y,mo,d]=f.split('-'); return `${d}/${mo}/${y}`; }
+
+function renderProximas() {
+  const pend=tps.filter(t=>!t.done&&t.fecha).sort((a,b)=>new Date(a.fecha)-new Date(b.fecha)).slice(0,5);
+  const el=document.getElementById('proximasEntregas');
+  if(!pend.length){el.innerHTML='<div class="empty"><span>🎉</span>Sin entregas pendientes</div>';return;}
+  el.innerHTML=pend.map(t=>{
+    const m=MATERIAS.find(x=>x.id===t.materiaId)||{color:'#666',nombre:''}, d=diasPara(t.fecha);
+    const[badge,bc]=d<0?['Vencido','badge-urgent']:d===0?['¡Hoy!','badge-urgent']:d<=3?[d+'d','badge-urgent']:d<=7?[d+'d','badge-prox']:[d+'d','badge-ok'];
+    return `<div class="task-item"><div class="task-dot" style="background:${m.color}"></div><div class="task-body"><div class="task-name">${t.nombre}</div><div class="task-meta">${m.nombre} · ${t.tipo||'TP'} · ${fmtFecha(t.fecha)}</div></div><div class="task-badge ${bc}">${badge}</div></div>`;
   }).join('');
 }
 
 // ── PROGRESO ──────────────────────────────────────
-function buildProgreso() {
-  document.getElementById('progMateria').innerHTML = MATERIAS.map(m=>{
-    const total = tps.filter(t=>t.materiaId===m.id).length;
-    const done  = tps.filter(t=>t.materiaId===m.id&&t.done).length;
-    const pct   = total ? Math.round(done/total*100) : 0;
-    return `<div style="margin-bottom:12px">
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
-        <span>${m.icon} ${m.nombre}</span>
-        <span style="color:var(--muted);font-family:'JetBrains Mono'">${done}/${total}</span>
-      </div>
-      <div class="prog-bar"><div class="prog-fill" style="width:${pct}%;background:${m.color}"></div></div>
-    </div>`;
+function renderProgreso() {
+  document.getElementById('progMateria').innerHTML=MATERIAS.map(m=>{
+    const tot=tps.filter(t=>t.materiaId===m.id).length, dn=tps.filter(t=>t.materiaId===m.id&&t.done).length, pct=tot?Math.round(dn/tot*100):0;
+    return `<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>${m.icon} ${m.nombre}</span><span style="color:var(--muted);font-family:'JetBrains Mono'">${dn}/${tot}</span></div><div class="prog-bar"><div class="prog-fill" style="width:${pct}%;background:${m.color}"></div></div></div>`;
   }).join('');
 }
 
 // ── AGENDA ────────────────────────────────────────
-function buildAgenda() {
-  const hoyIdx = new Date().getDay();
-  const dias = [
-    {idx:1,label:'Lunes',    extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Ing. Legal – Facultad',color:'#c9a84c',tag:'⚖️'}]},
-    {idx:2,label:'Martes',   extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Const. Metálicas/Madera',color:'#5281e0',tag:'🔩'}]},
-    {idx:3,label:'Miércoles',extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Infraestructura Vial',color:'#52c4a0',tag:'🛣️'}]},
-    {idx:4,label:'Jueves',   extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Cimentaciones',color:'#e09452',tag:'⛏️'}]},
-    {idx:5,label:'Viernes',  extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Estructuras Hormigón',color:'#e05252',tag:'🧱'}]},
-    {idx:6,label:'Sábado',   extras:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Diseño Arq./Urbanismo',color:'#a052e0',tag:'🏛️'}]},
-    {idx:0,label:'Domingo',  extras:[{t:'Todo el día',txt:'Descanso / Repaso libre',color:'#52c4a0',tag:'✨'}]},
+function renderAgenda() {
+  const hoy=new Date().getDay();
+  const dias=[
+    {idx:1,lbl:'Lunes',    bl:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',c:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Ing. Legal',c:'#c9a84c',tag:'⚖️'}]},
+    {idx:2,lbl:'Martes',   bl:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',c:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Const. Metálicas/Madera',c:'#5281e0',tag:'🔩'}]},
+    {idx:3,lbl:'Miércoles',bl:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',c:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Infraestructura Vial',c:'#52c4a0',tag:'🛣️'}]},
+    {idx:4,lbl:'Jueves',   bl:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',c:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Cimentaciones',c:'#e09452',tag:'⛏️'}]},
+    {idx:5,lbl:'Viernes',  bl:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',c:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Estructuras Hormigón',c:'#e05252',tag:'🧱'}]},
+    {idx:6,lbl:'Sábado',   bl:[{t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',c:'#5281e0',tag:'🏗️'},{t:'14:00–18:00',txt:'Diseño Arq./Urbanismo',c:'#a052e0',tag:'🏛️'}]},
+    {idx:0,lbl:'Domingo',  bl:[{t:'Todo el día',txt:'Descanso / Repaso libre',c:'#52c4a0',tag:'✨'}]},
   ];
-  document.getElementById('agendaContent').innerHTML = dias.map(d=>{
-    const isHoy = d.idx===hoyIdx;
-    return `<div class="agenda-day">
-      <div class="agenda-header">
-        <div class="dname ${isHoy?'hoy':''}">${isHoy?'▸ ':''} ${d.label.toUpperCase()} ${isHoy?'— HOY':''}</div>
-        <div class="agenda-line"></div>
-      </div>
-      <div class="agenda-blocks">${d.extras.map(b=>`
-        <div class="block" style="--color:${b.color}">
-          <div class="btime">${b.t}</div>
-          <div class="btext">${b.txt}</div>
-          <div class="btag">${b.tag}</div>
-        </div>`).join('')}
-      </div>
-    </div>`;
+  document.getElementById('agendaContent').innerHTML=dias.map(d=>{
+    const isHoy=d.idx===hoy;
+    return `<div class="agenda-day"><div class="agenda-header"><div class="dname ${isHoy?'hoy':''}">${isHoy?'▸ ':''}${d.lbl.toUpperCase()}${isHoy?' — HOY':''}</div><div class="agenda-line"></div></div><div class="agenda-blocks">${d.bl.map(b=>`<div class="block" style="--color:${b.c}"><div class="btime">${b.t}</div><div class="btext">${b.txt}</div><div class="btag">${b.tag}</div></div>`).join('')}</div></div>`;
   }).join('');
 }
 
 // ── TPs ───────────────────────────────────────────
-window.toggleAddForm = function() { document.getElementById('addForm').classList.toggle('open'); }
-
+window.toggleAddForm = () => document.getElementById('addForm').classList.toggle('open');
 window.addTP = function() {
-  const nombre = document.getElementById('tpNombre').value.trim();
-  const mid    = parseInt(document.getElementById('tpMateria').value);
-  const fecha  = document.getElementById('tpFecha').value;
-  const tipo   = document.getElementById('tpTipo').value;
+  const nombre=document.getElementById('tpNombre').value.trim();
   if(!nombre) return;
-  const tp = { id:Date.now(), nombre, materiaId:mid||null, fecha, tipo, done:false };
-  saveTP(tp);
-  ['tpNombre','tpFecha'].forEach(id=>document.getElementById(id).value='');
+  fbSet('tps/'+Date.now(), {id:Date.now(), nombre, materiaId:parseInt(document.getElementById('tpMateria').value)||null, fecha:document.getElementById('tpFecha').value, tipo:document.getElementById('tpTipo').value, done:false});
+  document.getElementById('tpNombre').value=''; document.getElementById('tpFecha').value='';
   document.getElementById('addForm').classList.remove('open');
-}
+};
+window.toggleDone = id => { const t=tps.find(x=>x.id===id); if(t){t.done=!t.done;fbSet('tps/'+id,t);} };
+window.deleteTP   = id => fbDel('tps/'+id);
 
-window.toggleDone = function(id) {
-  const t = tps.find(x=>x.id===id);
-  if(t){ t.done=!t.done; saveTP(t); }
-}
-
-window.deleteTP = function(id) { fbDel('tps/'+id); }
-
-function buildTPList() {
-  const el = document.getElementById('tpList');
-  if(!tps.length){ el.innerHTML='<div class="empty"><span>📋</span>No hay TPs cargados.</div>'; return; }
-  const sorted = [...tps].sort((a,b)=>{ if(a.done!==b.done) return a.done?1:-1; return new Date(a.fecha)-new Date(b.fecha); });
-  el.innerHTML = sorted.map(t=>{
-    const m = MATERIAS.find(x=>x.id===t.materiaId)||{color:'#555',nombre:''};
-    const d = diasPara(t.fecha);
+function renderTPList() {
+  const el=document.getElementById('tpList');
+  if(!tps.length){el.innerHTML='<div class="empty"><span>📋</span>No hay TPs cargados.</div>';return;}
+  el.innerHTML=[...tps].sort((a,b)=>a.done!==b.done?a.done?1:-1:new Date(a.fecha)-new Date(b.fecha)).map(t=>{
+    const m=MATERIAS.find(x=>x.id===t.materiaId)||{color:'#555',nombre:''}, d=diasPara(t.fecha);
     let badge='',bc='';
-    if(!t.done){
-      if(d<0){badge='Vencido';bc='badge-urgent';}
-      else if(d===0){badge='¡Hoy!';bc='badge-urgent';}
-      else if(d<=3){badge=d+'d';bc='badge-urgent';}
-      else if(d<=7){badge=d+'d';bc='badge-prox';}
-      else{badge=d+'d';bc='badge-ok';}
-    } else{badge='Listo';bc='badge-done';}
-    return `<div class="task-item" style="${t.done?'opacity:.55':''}">
-      <div class="task-check ${t.done?'checked':''}" onclick="toggleDone(${t.id})"></div>
-      <div class="task-dot" style="background:${m.color}"></div>
-      <div class="task-body">
-        <div class="task-name" style="${t.done?'text-decoration:line-through;color:var(--muted)':''}">${t.nombre}</div>
-        <div class="task-meta">${m.nombre} · ${t.tipo||'TP'}${t.fecha?' · '+formatFecha(t.fecha):''}</div>
-      </div>
-      <div class="task-badge ${bc}">${badge}</div>
-      <button onclick="deleteTP(${t.id})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px">×</button>
-    </div>`;
+    if(!t.done){if(d<0){badge='Vencido';bc='badge-urgent';}else if(d===0){badge='¡Hoy!';bc='badge-urgent';}else if(d<=3){badge=d+'d';bc='badge-urgent';}else if(d<=7){badge=d+'d';bc='badge-prox';}else{badge=d+'d';bc='badge-ok';}}else{badge='Listo';bc='badge-done';}
+    return `<div class="task-item" style="${t.done?'opacity:.55':''}"><div class="task-check ${t.done?'checked':''}" onclick="toggleDone(${t.id})"></div><div class="task-dot" style="background:${m.color}"></div><div class="task-body"><div class="task-name" style="${t.done?'text-decoration:line-through;color:var(--muted)':''}">${t.nombre}</div><div class="task-meta">${m.nombre} · ${t.tipo||'TP'}${t.fecha?' · '+fmtFecha(t.fecha):''}</div></div><div class="task-badge ${bc}">${badge}</div><button onclick="deleteTP(${t.id})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px">×</button></div>`;
   }).join('');
 }
 
 // ── NOTAS ─────────────────────────────────────────
-function populateMateriaSelects() {
-  const opts = MATERIAS.map(m=>`<option value="${m.id}">${m.icon} ${m.nombre}</option>`).join('');
-  ['tpMateria','notaMateria'].forEach(id=>{
-    const sel = document.getElementById(id);
-    if(sel) sel.innerHTML = sel.innerHTML.split('</option>')[0]+'</option>'+opts;
+function fillSelects() {
+  const opts=MATERIAS.map(m=>`<option value="${m.id}">${m.icon} ${m.nombre}</option>`).join('');
+  ['tpMateria','notaMateria','recMateria'].forEach(id=>{
+    const s=document.getElementById(id); if(s) s.innerHTML=(s.innerHTML.split('</option>')[0]+'</option>')+opts;
   });
 }
 
-let filtroNota = null;
-function buildNotaFiltros() {
-  document.getElementById('notaFiltros').innerHTML =
-    `<button class="btn btn-sm ${filtroNota===null?'btn-gold':'btn-ghost'}" onclick="setFiltroNota(null)">Todas</button>`
-    + MATERIAS.map(m=>`<button class="btn btn-sm btn-ghost" onclick="setFiltroNota(${m.id})"
-        style="${filtroNota===m.id?'border-color:'+m.color+';color:'+m.color:''}">${m.icon} ${m.nombre.split(' ')[0]}</button>`).join('');
-}
-window.setFiltroNota = function(id){ filtroNota=id; buildNotas(); }
+let filtroNota=null;
+window.setFiltroNota = id => { filtroNota=id; renderNotas(); };
+window.openNotaModal = function(id=null) {
+  editingNota=id;
+  const n=id?notas.find(x=>x.id===id):null;
+  document.getElementById('modalTitle').textContent=n?'Editar Nota':'Nueva Nota';
+  document.getElementById('notaTitulo').value=n?.titulo||'';
+  document.getElementById('notaMateria').value=n?.materiaId||'';
+  document.getElementById('notaCuerpo').value=n?.cuerpo||'';
+  document.getElementById('btnDeleteNota').style.display=n?'':'none';
+  document.getElementById('modalOverlay').classList.add('open');
+};
+window.closeModal  = () => { document.getElementById('modalOverlay').classList.remove('open'); editingNota=null; };
+window.saveNota    = function() {
+  const titulo=document.getElementById('notaTitulo').value.trim(), cuerpo=document.getElementById('notaCuerpo').value.trim();
+  if(!titulo&&!cuerpo) return;
+  const id=editingNota||Date.now();
+  fbSet('notas/'+id, {id, titulo, materiaId:parseInt(document.getElementById('notaMateria').value)||null, cuerpo, fecha:new Date().toLocaleDateString('es-AR')});
+  closeModal();
+};
+window.deleteNota  = () => { if(editingNota){fbDel('notas/'+editingNota);closeModal();} };
 
-function buildNotas() {
-  buildNotaFiltros();
-  const filtered = filtroNota ? notas.filter(n=>n.materiaId===filtroNota) : notas;
-  const el = document.getElementById('notasGrid');
-  if(!filtered.length){ el.innerHTML='<div class="empty" style="grid-column:1/-1"><span>📝</span>Sin notas.</div>'; return; }
-  el.innerHTML = filtered.map(n=>{
-    const m = MATERIAS.find(x=>x.id===n.materiaId)||{color:'#555',nombre:'General'};
-    return `<div class="nota-card" style="--color:${m.color}" onclick="openNotaModal(${n.id})">
-      <div class="nmat">${m.nombre}</div>
-      <div class="ntitle">${n.titulo||'Sin título'}</div>
-      <div class="nbody">${n.cuerpo||''}</div>
-      <div class="ndate">${n.fecha||''}</div>
-    </div>`;
+function renderNotas() {
+  const filtered=filtroNota?notas.filter(n=>n.materiaId===filtroNota):notas;
+  document.getElementById('notaFiltros').innerHTML=
+    `<button class="btn btn-sm ${filtroNota===null?'btn-gold':'btn-ghost'}" onclick="setFiltroNota(null)">Todas</button>`
+    +MATERIAS.map(m=>`<button class="btn btn-sm btn-ghost" onclick="setFiltroNota(${m.id})" style="${filtroNota===m.id?'border-color:'+m.color+';color:'+m.color:''}">${m.icon} ${m.nombre.split(' ')[0]}</button>`).join('');
+  const el=document.getElementById('notasGrid');
+  if(!filtered.length){el.innerHTML='<div class="empty" style="grid-column:1/-1"><span>📝</span>Sin notas.</div>';return;}
+  el.innerHTML=filtered.map(n=>{
+    const m=MATERIAS.find(x=>x.id===n.materiaId)||{color:'#555',nombre:'General'};
+    return `<div class="nota-card" style="--color:${m.color}" onclick="openNotaModal(${n.id})"><div class="nmat">${m.nombre}</div><div class="ntitle">${n.titulo||'Sin título'}</div><div class="nbody">${n.cuerpo||''}</div><div class="ndate">${n.fecha||''}</div></div>`;
   }).join('');
 }
 
-window.openNotaModal = function(id=null) {
-  editingNota = id;
-  const n = id ? notas.find(x=>x.id===id) : null;
-  document.getElementById('modalTitle').textContent = n ? 'Editar Nota' : 'Nueva Nota';
-  document.getElementById('notaTitulo').value = n?.titulo||'';
-  document.getElementById('notaMateria').value = n?.materiaId||'';
-  document.getElementById('notaCuerpo').value  = n?.cuerpo||'';
-  document.getElementById('btnDeleteNota').style.display = n?'':'none';
-  document.getElementById('modalOverlay').classList.add('open');
-}
-window.closeModal = function() { document.getElementById('modalOverlay').classList.remove('open'); editingNota=null; }
-
-window.saveNota = function() {
-  const titulo = document.getElementById('notaTitulo').value.trim();
-  const mid    = parseInt(document.getElementById('notaMateria').value)||null;
-  const cuerpo = document.getElementById('notaCuerpo').value.trim();
-  if(!titulo && !cuerpo) return;
-  const fecha = new Date().toLocaleDateString('es-AR');
-  const id = editingNota || Date.now();
-  saveNota_({id, titulo, materiaId:mid, cuerpo, fecha});
-  closeModal();
-}
-window.deleteNota = function() {
-  if(!editingNota) return;
-  fbDel('notas/'+editingNota);
-  closeModal();
-}
-
 // ── WORK TIMER ────────────────────────────────────
-function updateWorkTimer() {
-  const now=new Date(), h=now.getHours(), m=now.getMinutes(), day=now.getDay();
-  const el=document.getElementById('worktimer'); if(!el) return;
+function tickWorkTimer() {
+  const now=new Date(), h=now.getHours(), m=now.getMinutes(), day=now.getDay(), el=document.getElementById('worktimer');
+  if(!el) return;
   if(day===0){el.textContent='Día libre';return;}
   if(h<8){const mins=(8-h)*60-m;el.textContent=`Trabajo en ${Math.floor(mins/60)}h ${mins%60}m`;}
   else if(h<13){const mins=(13-h)*60-m;el.textContent=`Fin trabajo: ${Math.floor(mins/60)}h ${mins%60}m`;}
-  else{el.textContent='Turno terminado ✓';}
-}
-
-// ── HELPERS ───────────────────────────────────────
-function formatFecha(f) {
-  if(!f) return '';
-  const [y,mo,d] = f.split('-');
-  return `${d}/${mo}/${y}`;
+  else el.textContent='Turno terminado ✓';
 }
 
 // ── RECORDATORIOS ─────────────────────────────────
-let recIntervals = {};
-
-function initRecordatorios() {
-  populateRecMateriaSelect();
-  checkNotifPermission();
-  document.getElementById('recRepeat').addEventListener('change', function(){
-    document.getElementById('diasCheck').style.display = this.value==='personalizado'?'flex':'none';
-  });
-}
-
-function populateRecMateriaSelect() {
-  const sel = document.getElementById('recMateria');
-  if(!sel) return;
-  sel.innerHTML = '<option value="">— Materia (opcional) —</option>'
-    + MATERIAS.map(m=>`<option value="${m.id}">${m.icon} ${m.nombre}</option>`).join('');
-}
-
 function checkNotifPermission() {
   if('Notification' in window && Notification.permission==='default')
     document.getElementById('permBanner').style.display='flex';
 }
-
-window.pedirPermiso = function() {
-  Notification.requestPermission().then(p=>{
-    document.getElementById('permBanner').style.display='none';
-    if(p==='granted') mostrarBanner('🔔 Activadas','Vas a recibir tus recordatorios');
-  });
-}
-
-window.toggleRecForm = function() { document.getElementById('recForm').classList.toggle('open'); }
-
+window.pedirPermiso    = () => Notification.requestPermission().then(p=>{document.getElementById('permBanner').style.display='none';if(p==='granted')mostrarBanner('🔔 Activadas','Vas a recibir tus recordatorios');});
+window.toggleRecForm   = () => document.getElementById('recForm').classList.toggle('open');
 window.addRecordatorio = function() {
-  const msg    = document.getElementById('recMsg').value.trim();
-  const hora   = document.getElementById('recHora').value;
-  const repeat = document.getElementById('recRepeat').value;
-  const mid    = parseInt(document.getElementById('recMateria').value)||null;
+  const msg=document.getElementById('recMsg').value.trim(), hora=document.getElementById('recHora').value, repeat=document.getElementById('recRepeat').value;
+  const mid=parseInt(document.getElementById('recMateria').value)||null;
   if(!msg||!hora) return;
   let dias=[];
-  if(repeat==='diario')     dias=[0,1,2,3,4,5,6];
-  else if(repeat==='laborable') dias=[1,2,3,4,5,6];
-  else if(repeat==='unico') dias=[new Date().getDay()];
-  else {
-    document.querySelectorAll('#diasCheck input:checked').forEach(cb=>dias.push(parseInt(cb.value)));
-    if(!dias.length){alert('Seleccioná al menos un día');return;}
-  }
-  const rec={id:Date.now(),msg,hora,dias,repeat,materiaId:mid,activo:true};
-  saveRec(rec);
-  document.getElementById('recMsg').value='';
-  document.getElementById('recForm').classList.remove('open');
-}
+  if(repeat==='diario')dias=[0,1,2,3,4,5,6];
+  else if(repeat==='laborable')dias=[1,2,3,4,5,6];
+  else if(repeat==='unico')dias=[new Date().getDay()];
+  else{document.querySelectorAll('#diasCheck input:checked').forEach(cb=>dias.push(parseInt(cb.value)));if(!dias.length){alert('Seleccioná al menos un día');return;}}
+  const id=Date.now();
+  fbSet('recordatorios/'+id, {id,msg,hora,dias,repeat,materiaId:mid,activo:true});
+  document.getElementById('recMsg').value=''; document.getElementById('recForm').classList.remove('open');
+};
+window.deleteRec = id => { fbDel('recordatorios/'+id); clearInterval(recIntervals[id]); };
+window.toggleRec = id => { const r=recordatorios.find(x=>x.id===id); if(r){r.activo=!r.activo;fbSet('recordatorios/'+id,r);} };
 
-window.deleteRec = function(id) { fbDel('recordatorios/'+id); clearInterval(recIntervals[id]); }
-
-window.toggleRec = function(id) {
-  const r=recordatorios.find(x=>x.id===id);
-  if(!r) return;
-  r.activo=!r.activo; saveRec(r);
-}
-
-function buildRecGrid() {
-  const el=document.getElementById('recGrid');
-  if(!el) return;
+function renderRecGrid() {
+  const el=document.getElementById('recGrid'); if(!el) return;
   if(!recordatorios.length){el.innerHTML='<div class="empty"><span>🔔</span>Sin recordatorios.</div>';return;}
   el.innerHTML=recordatorios.map(r=>{
-    const m=r.materiaId?MATERIAS.find(x=>x.id===r.materiaId):null;
-    const color=m?m.color:'var(--gold)';
-    const diasLabel={diario:'Todos los días',laborable:'Lun–Sáb',unico:'Una vez',
-      personalizado:(r.dias||[]).map(d=>['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][d]).join(', ')}[r.repeat]||'';
-    return `<div class="rec-card" style="--color:${color}">
-      <div class="rc-header"><div class="rc-time">⏰ ${r.hora}</div><div class="rc-dias">${diasLabel}</div></div>
-      <div class="rc-msg">${r.msg}</div>
-      ${m?`<div class="rc-mat">${m.icon} ${m.nombre}</div>`:''}
-      <div class="rc-actions">
-        <button class="rc-toggle ${r.activo?'on':''}" onclick="toggleRec(${r.id})">${r.activo?'✓ Activo':'Pausado'}</button>
-        <button class="rc-del" onclick="deleteRec(${r.id})">Eliminar</button>
-      </div>
-    </div>`;
+    const m=r.materiaId?MATERIAS.find(x=>x.id===r.materiaId):null, color=m?m.color:'var(--gold)';
+    const dl={diario:'Todos los días',laborable:'Lun–Sáb',unico:'Una vez',personalizado:(r.dias||[]).map(d=>['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][d]).join(', ')}[r.repeat]||'';
+    return `<div class="rec-card" style="--color:${color}"><div class="rc-header"><div class="rc-time">⏰ ${r.hora}</div><div class="rc-dias">${dl}</div></div><div class="rc-msg">${r.msg}</div>${m?`<div class="rc-mat">${m.icon} ${m.nombre}</div>`:''}<div class="rc-actions"><button class="rc-toggle ${r.activo?'on':''}" onclick="toggleRec(${r.id})">${r.activo?'✓ Activo':'Pausado'}</button><button class="rc-del" onclick="deleteRec(${r.id})">Eliminar</button></div></div>`;
   }).join('');
 }
 
 function startAllTimers() { recordatorios.forEach(r=>{if(r.activo)startTimer(r);}); }
-function startTimer(rec) {
-  clearInterval(recIntervals[rec.id]);
-  recIntervals[rec.id]=setInterval(()=>checkFire(rec),15000);
-  checkFire(rec);
-}
+function startTimer(rec) { clearInterval(recIntervals[rec.id]); recIntervals[rec.id]=setInterval(()=>checkFire(rec),15000); checkFire(rec); }
 function checkFire(rec) {
   if(!rec.activo) return;
-  const now=new Date(), hoy=now.getDay();
-  const hhmm=now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
+  const now=new Date(), hoy=now.getDay(), hhmm=now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
   if(!(rec.dias||[]).includes(hoy)||hhmm!==rec.hora) return;
   const key='fired_'+rec.id+'_'+hhmm;
   if(sessionStorage.getItem(key)) return;
   sessionStorage.setItem(key,'1');
   const m=rec.materiaId?MATERIAS.find(x=>x.id===rec.materiaId):null;
   dispararNotif(m?`${m.icon} ${m.nombre}`:'📚 Recordatorio', rec.msg);
-  if(rec.repeat==='unico'){rec.activo=false;saveRec(rec);}
+  if(rec.repeat==='unico'){rec.activo=false;fbSet('recordatorios/'+rec.id,rec);}
 }
 function dispararNotif(titulo,cuerpo) {
   mostrarBanner(titulo,cuerpo);
-  if('Notification' in window&&Notification.permission==='granted')
-    new Notification(titulo,{body:cuerpo});
+  if('Notification' in window&&Notification.permission==='granted') new Notification(titulo,{body:cuerpo});
 }
 function mostrarBanner(titulo,cuerpo) {
   document.getElementById('notifTitle').textContent=titulo;
   document.getElementById('notifBody').textContent=cuerpo;
-  const b=document.getElementById('notifBanner');
-  b.classList.add('show'); setTimeout(()=>b.classList.remove('show'),6000);
+  const b=document.getElementById('notifBanner'); b.classList.add('show'); setTimeout(()=>b.classList.remove('show'),6000);
 }
-window.cerrarBanner = function() { document.getElementById('notifBanner').classList.remove('show'); }
-
-// ── IA (sin cambios) ──────────────────────────────
-window.checkApiKey = function(){}; // deshabilitada
-function initIA(){}
+window.cerrarBanner = () => document.getElementById('notifBanner').classList.remove('show');
 
 // ── PWA ───────────────────────────────────────────
 let deferredPrompt;
-window.addEventListener('beforeinstallprompt',e=>{
-  e.preventDefault(); deferredPrompt=e;
-  const hint=document.getElementById('installHint');
-  if(hint) hint.style.display='flex';
-});
-window.instalarPWA = function(){
-  if(!deferredPrompt) return;
-  deferredPrompt.prompt();
-  deferredPrompt.userChoice.then(()=>{deferredPrompt=null;document.getElementById('installHint').style.display='none';});
-}
-
-// ── SWIPE ─────────────────────────────────────────
-(function(){
-  const SECTIONS=['dashboard','agenda','tps','notas','recordatorios'];
-  let touchX=0;
-  document.addEventListener('touchstart',e=>{touchX=e.touches[0].clientX;},{passive:true});
-  document.addEventListener('touchend',e=>{
-    const dx=e.changedTouches[0].clientX-touchX;
-    if(Math.abs(dx)<60) return;
-    const idx=SECTIONS.indexOf(currentSection);
-    if(dx<0&&idx<SECTIONS.length-1) goto(SECTIONS[idx+1]);
-    if(dx>0&&idx>0) goto(SECTIONS[idx-1]);
-  },{passive:true});
-})();
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;const h=document.getElementById('installHint');if(h)h.style.display='flex';});
+window.instalarPWA = () => { if(!deferredPrompt)return; deferredPrompt.prompt(); deferredPrompt.userChoice.then(()=>{deferredPrompt=null;document.getElementById('installHint').style.display='none';}); };
 
 // ── START ─────────────────────────────────────────
 init();
-initRecordatorios();
-
-
-</script>
-</body>
-</html>
-
-function updateDate() {
-  const now = new Date();
-  document.getElementById('navDate').textContent =
-    DIAS_SEMANA[now.getDay()] + ' ' + now.toLocaleDateString('es-AR');
-}
-
-// ── NAV ──────────────────────────────────────────
-// ── NAV ──────────────────────────────────────────
-const FAB_SECTIONS = { tps:'toggleAddForm', notas:'openNotaModal', recordatorios:'toggleRecForm' };
-
-function goto(sec, el) {
-  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  document.querySelectorAll('.bn-item').forEach(t => t.classList.remove('active'));
-  document.getElementById('sec-'+sec).classList.add('active');
-  const bn = document.getElementById('bn-'+sec);
-  if(bn) bn.classList.add('active');
-  else if(el) el.classList.add('active');
-
-  // FAB contextual
-  const fab = document.getElementById('fab');
-  if(FAB_SECTIONS[sec]) { fab.classList.remove('hidden'); }
-  else { fab.classList.add('hidden'); }
-  currentSection = sec;
-}
-
-let currentSection = 'dashboard';
-function fabAction() {
-  const fn = FAB_SECTIONS[currentSection];
-  if(fn && window[fn]) window[fn]();
-}
-
-// ── WEEK BANNER ──────────────────────────────────
-function buildWeekBanner() {
-  const hoy = new Date().getDay(); // 0=dom
-  const container = document.getElementById('weekBanner');
-  container.innerHTML = '';
-  MATERIAS.forEach((m,i) => {
-    const diaIdx = i+1; // Lun=1..Sáb=6
-    const isHoy = hoy === diaIdx;
-    const chip = document.createElement('div');
-    chip.className = 'day-chip' + (isHoy?' today':'');
-    chip.style.setProperty('--color', m.color);
-    chip.innerHTML = `<div class="dia">${m.dia}</div>
-      <div class="materia">${m.icon} ${m.nombre}</div>
-      <div class="hora">Tarde · Facultad</div>`;
-    container.appendChild(chip);
-  });
-}
-
-// ── STATS ─────────────────────────────────────────
-function buildStats() {
-  const pendientes = tps.filter(t=>!t.done).length;
-  const urgentes   = tps.filter(t=>!t.done && diasPara(t.fecha)<=3).length;
-  const hechos     = tps.filter(t=>t.done).length;
-  document.getElementById('statsRow').innerHTML = `
-    <div class="stat-pill"><div class="num" style="color:var(--orange)">${pendientes}</div><div class="lbl">TPs<br>pendientes</div></div>
-    <div class="stat-pill"><div class="num" style="color:var(--red)">${urgentes}</div><div class="lbl">Urgentes<br>(≤3 días)</div></div>
-    <div class="stat-pill"><div class="num" style="color:var(--green)">${hechos}</div><div class="lbl">Entregados<br>/ resueltos</div></div>
-    <div class="stat-pill"><div class="num" style="color:var(--gold)">6</div><div class="lbl">Materias<br>activas</div></div>
-    <div class="stat-pill"><div class="num" style="color:var(--blue)">${notas.length}</div><div class="lbl">Notas de<br>estudio</div></div>
-  `;
-}
-
-// ── PROXIMAS ENTREGAS ─────────────────────────────
-function diasPara(fecha) {
-  if(!fecha) return 999;
-  const hoy = new Date(); hoy.setHours(0,0,0,0);
-  const f = new Date(fecha+'T00:00:00');
-  return Math.ceil((f-hoy)/(1000*60*60*24));
-}
-function buildProximas() {
-  const pendientes = tps.filter(t=>!t.done && t.fecha)
-    .sort((a,b)=>new Date(a.fecha)-new Date(b.fecha)).slice(0,5);
-  const el = document.getElementById('proximasEntregas');
-  if(!pendientes.length) { el.innerHTML='<div class="empty"><span>🎉</span>Sin entregas pendientes</div>'; return; }
-  el.innerHTML = pendientes.map(t=>{
-    const m = MATERIAS.find(x=>x.id===t.materiaId)||{color:'#666'};
-    const d = diasPara(t.fecha);
-    let badge, bc;
-    if(d<0)        { badge='Vencido';   bc='badge-urgent'; }
-    else if(d===0) { badge='¡Hoy!';     bc='badge-urgent'; }
-    else if(d<=3)  { badge=d+'d';       bc='badge-urgent'; }
-    else if(d<=7)  { badge=d+'d';       bc='badge-prox';   }
-    else           { badge=d+'d';       bc='badge-ok';     }
-    return `<div class="task-item">
-      <div class="task-dot" style="background:${m.color}"></div>
-      <div class="task-body">
-        <div class="task-name">${t.nombre}</div>
-        <div class="task-meta">${m.nombre||''} · ${t.tipo||'TP'} · ${formatFecha(t.fecha)}</div>
-      </div>
-      <div class="task-badge ${bc}">${badge}</div>
-    </div>`;
-  }).join('');
-}
-
-// ── PROGRESO POR MATERIA ──────────────────────────
-function buildProgreso() {
-  const el = document.getElementById('progMateria');
-  el.innerHTML = MATERIAS.map(m=>{
-    const total = tps.filter(t=>t.materiaId===m.id).length;
-    const done  = tps.filter(t=>t.materiaId===m.id&&t.done).length;
-    const pct   = total ? Math.round(done/total*100) : 0;
-    return `<div style="margin-bottom:12px">
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
-        <span>${m.icon} ${m.nombre}</span>
-        <span style="color:var(--muted);font-family:'JetBrains Mono'">${done}/${total}</span>
-      </div>
-      <div class="prog-bar"><div class="prog-fill" style="width:${pct}%;background:${m.color}"></div></div>
-    </div>`;
-  }).join('');
-}
-
-// ── AGENDA ───────────────────────────────────────
-function buildAgenda() {
-  const hoyIdx = new Date().getDay();
-  const el = document.getElementById('agendaContent');
-  // Lun–Sáb
-  const dias = [
-    { idx:1, label:'Lunes',     materia:MATERIAS[0], extras:[
-      {t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️ Empresa'},
-      {t:'14:00–18:00',txt:'Ing. Legal – Facultad',color:'#c9a84c',tag:'⚖️ Cursada'},
-    ]},
-    { idx:2, label:'Martes',    materia:MATERIAS[1], extras:[
-      {t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️ Empresa'},
-      {t:'14:00–18:00',txt:'Const. Metálicas/Madera',color:'#5281e0',tag:'🔩 Cursada'},
-    ]},
-    { idx:3, label:'Miércoles', materia:MATERIAS[2], extras:[
-      {t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️ Empresa'},
-      {t:'14:00–18:00',txt:'Infraestructura Vial',color:'#52c4a0',tag:'🛣️ Cursada'},
-    ]},
-    { idx:4, label:'Jueves',    materia:MATERIAS[3], extras:[
-      {t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️ Empresa'},
-      {t:'14:00–18:00',txt:'Cimentaciones',color:'#e09452',tag:'⛏️ Cursada'},
-    ]},
-    { idx:5, label:'Viernes',   materia:MATERIAS[4], extras:[
-      {t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️ Empresa'},
-      {t:'14:00–18:00',txt:'Estructuras Hormigón',color:'#e05252',tag:'🧱 Cursada'},
-    ]},
-    { idx:6, label:'Sábado',    materia:MATERIAS[5], extras:[
-      {t:'08:00–13:00',txt:'Trabajo – RO.IV.LE.',color:'#5281e0',tag:'🏗️ Empresa'},
-      {t:'14:00–18:00',txt:'Diseño Arq./Urbanismo',color:'#a052e0',tag:'🏛️ Cursada'},
-    ]},
-    { idx:0, label:'Domingo',   materia:null, extras:[
-      {t:'Todo el día',txt:'Descanso / Repaso libre',color:'#52c4a0',tag:'✨'},
-    ]},
-  ];
-  el.innerHTML = dias.map(d=>{
-    const isHoy = d.idx===hoyIdx;
-    const blocks = d.extras.map(b=>`
-      <div class="block" style="--color:${b.color}">
-        <div class="btime">${b.t}</div>
-        <div class="btext">${b.txt}</div>
-        <div class="btag">${b.tag}</div>
-      </div>`).join('');
-    return `<div class="agenda-day">
-      <div class="agenda-header">
-        <div class="dname ${isHoy?'hoy':''}">${isHoy?'▸ ':''} ${d.label.toUpperCase()} ${isHoy?'— HOY':''}</div>
-        <div class="agenda-line"></div>
-      </div>
-      <div class="agenda-blocks">${blocks}</div>
-    </div>`;
-  }).join('');
-}
-
-// ── TPs ───────────────────────────────────────────
-function toggleAddForm() {
-  document.getElementById('addForm').classList.toggle('open');
-}
-function addTP() {
-  const nombre = document.getElementById('tpNombre').value.trim();
-  const mid    = parseInt(document.getElementById('tpMateria').value);
-  const fecha  = document.getElementById('tpFecha').value;
-  const tipo   = document.getElementById('tpTipo').value;
-  if(!nombre) return;
-  tps.unshift({ id:Date.now(), nombre, materiaId:mid||null, fecha, tipo, done:false });
-  save('tps', tps);
-  ['tpNombre','tpFecha'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('addForm').classList.remove('open');
-  buildTPList(); buildStats(); buildProximas(); buildProgreso();
-}
-function toggleDone(id) {
-  const t = tps.find(x=>x.id===id);
-  if(t) { t.done=!t.done; save('tps',tps); buildTPList(); buildStats(); buildProximas(); buildProgreso(); }
-}
-function deleteTP(id) {
-  tps = tps.filter(x=>x.id!==id); save('tps',tps);
-  buildTPList(); buildStats(); buildProximas(); buildProgreso();
-}
-function buildTPList() {
-  const el = document.getElementById('tpList');
-  if(!tps.length) { el.innerHTML='<div class="empty"><span>📋</span>No hay TPs cargados.<br>Usá el botón + para agregar.</div>'; return; }
-  const sorted = [...tps].sort((a,b)=>{ if(a.done!==b.done) return a.done?1:-1; return new Date(a.fecha)-new Date(b.fecha); });
-  el.innerHTML = sorted.map(t=>{
-    const m = MATERIAS.find(x=>x.id===t.materiaId)||{color:'#555',nombre:''};
-    const d = diasPara(t.fecha);
-    let badge='', bc='';
-    if(!t.done){
-      if(d<0)       { badge='Vencido'; bc='badge-urgent'; }
-      else if(d===0){ badge='¡Hoy!';  bc='badge-urgent'; }
-      else if(d<=3) { badge=d+'d';    bc='badge-urgent'; }
-      else if(d<=7) { badge=d+'d';    bc='badge-prox';   }
-      else          { badge=d+'d';    bc='badge-ok';     }
-    } else { badge='Listo'; bc='badge-done'; }
-    return `<div class="task-item" style="${t.done?'opacity:.55':''}">
-      <div class="task-check ${t.done?'checked':''}" onclick="toggleDone(${t.id})"></div>
-      <div class="task-dot" style="background:${m.color}"></div>
-      <div class="task-body">
-        <div class="task-name" style="${t.done?'text-decoration:line-through;color:var(--muted)':''}">${t.nombre}</div>
-        <div class="task-meta">${m.nombre} · ${t.tipo||'TP'}${t.fecha?' · '+formatFecha(t.fecha):''}</div>
-      </div>
-      <div class="task-badge ${bc}">${badge}</div>
-      <button onclick="deleteTP(${t.id})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px">×</button>
-    </div>`;
-  }).join('');
-}
-
-// ── NOTAS ─────────────────────────────────────────
-function populateMateriaSelects() {
-  const opts = MATERIAS.map(m=>`<option value="${m.id}">${m.icon} ${m.nombre}</option>`).join('');
-  ['tpMateria','notaMateria'].forEach(id=>{
-    const sel = document.getElementById(id);
-    if(sel) sel.innerHTML = sel.innerHTML.split('</option>')[0]+'</option>'+opts;
-  });
-}
-
-let filtroNota = null;
-function buildNotaFiltros() {
-  const el = document.getElementById('notaFiltros');
-  el.innerHTML = `<button class="btn btn-sm ${filtroNota===null?'btn-gold':'btn-ghost'}" onclick="setFiltroNota(null)">Todas</button>`
-    + MATERIAS.map(m=>`<button class="btn btn-sm btn-ghost" onclick="setFiltroNota(${m.id})"
-        style="${filtroNota===m.id?'border-color:'+m.color+';color:'+m.color:''}">${m.icon} ${m.nombre.split(' ')[0]}</button>`).join('');
-}
-function setFiltroNota(id){ filtroNota=id; buildNotas(); }
-function buildNotas() {
-  buildNotaFiltros();
-  const filtered = filtroNota ? notas.filter(n=>n.materiaId===filtroNota) : notas;
-  const el = document.getElementById('notasGrid');
-  if(!filtered.length){ el.innerHTML='<div class="empty" style="grid-column:1/-1"><span>📝</span>Sin notas. Creá la primera.</div>'; return; }
-  el.innerHTML = filtered.map(n=>{
-    const m = MATERIAS.find(x=>x.id===n.materiaId)||{color:'#555',nombre:'General'};
-    return `<div class="nota-card" style="--color:${m.color}" onclick="openNotaModal(${n.id})">
-      <div class="nmat">${m.nombre}</div>
-      <div class="ntitle">${n.titulo||'Sin título'}</div>
-      <div class="nbody">${n.cuerpo||''}</div>
-      <div class="ndate">${n.fecha||''}</div>
-    </div>`;
-  }).join('');
-}
-function openNotaModal(id=null) {
-  editingNota = id;
-  const n = id ? notas.find(x=>x.id===id) : null;
-  document.getElementById('modalTitle').textContent = n ? 'Editar Nota' : 'Nueva Nota';
-  document.getElementById('notaTitulo').value = n?.titulo||'';
-  document.getElementById('notaMateria').value = n?.materiaId||'';
-  document.getElementById('notaCuerpo').value  = n?.cuerpo||'';
-  document.getElementById('btnDeleteNota').style.display = n?'':'none';
-  document.getElementById('modalOverlay').classList.add('open');
-}
-function closeModal() { document.getElementById('modalOverlay').classList.remove('open'); editingNota=null; }
-function saveNota() {
-  const titulo = document.getElementById('notaTitulo').value.trim();
-  const mid    = parseInt(document.getElementById('notaMateria').value)||null;
-  const cuerpo = document.getElementById('notaCuerpo').value.trim();
-  if(!titulo && !cuerpo) return;
-  const fecha = new Date().toLocaleDateString('es-AR');
-  if(editingNota) {
-    const n = notas.find(x=>x.id===editingNota);
-    if(n){ n.titulo=titulo; n.materiaId=mid; n.cuerpo=cuerpo; n.fecha=fecha; }
-  } else {
-    notas.unshift({id:Date.now(),titulo,materiaId:mid,cuerpo,fecha});
-  }
-  save('notas',notas); closeModal(); buildNotas(); buildStats();
-}
-function deleteNota() {
-  if(!editingNota) return;
-  notas=notas.filter(x=>x.id!==editingNota); save('notas',notas);
-  closeModal(); buildNotas(); buildStats();
-}
-
-// ── WORK TIMER ────────────────────────────────────
-function updateWorkTimer() {
-  const now = new Date();
-  const h=now.getHours(), m=now.getMinutes();
-  const el=document.getElementById('worktimer');
-  if(!el) return;
-  const day=now.getDay();
-  if(day===0){ el.textContent='Día libre'; return; }
-  if(h<8){ const mins=(8-h)*60-m; el.textContent=`Trabajo en ${Math.floor(mins/60)}h ${mins%60}m`; }
-  else if(h<13){ const mins=(13-h)*60-m; el.textContent=`Fin trabajo: ${Math.floor(mins/60)}h ${mins%60}m`; }
-  else { el.textContent='Turno terminado ✓'; }
-}
-
-// ── HELPERS ───────────────────────────────────────
-function formatFecha(f) {
-  if(!f) return '';
-  const [y,mo,d] = f.split('-');
-  return `${d}/${mo}/${y}`;
-}
-
-// ── IA TUTORA ─────────────────────────────────────
-const SYSTEM_PROMPT = `Sos una tutora experta en Ingeniería Civil, especializada en las siguientes materias universitarias:
-1. Ingeniería Legal (leyes, contratos, responsabilidad profesional, normas)
-2. Construcciones Metálicas y de Madera (estructuras, uniones, perfiles, madera laminada)
-3. Infraestructura Vial (pavimentos, diseño geométrico, drenaje, señalización)
-4. Cimentaciones (suelos, fundaciones, pilotes, zapatas, muros de contención)
-5. Estructuras de Hormigón (hormigón armado, pretensado, diseño por rotura)
-6. Diseño Arquitectónico, Planeamiento y Urbanismo (zonificación, morfología urbana, códigos)
-
-El estudiante es Ivan, estudia Ingeniería Civil en Argentina, cursa por las tardes (lunes a sábado) y trabaja a la mañana en una empresa constructora llamada RO.IV.LE. (Construcciones y Proyectos), que se dedica a cabañas, hoteles, piscinas, natatoios, oficinas y proyectos arquitectónicos personalizados. Ivan tiene base de ingeniería civil aplicada.
-
-Tu estilo:
-- Explicaciones claras, directas y con ejemplos prácticos
-- Usá fórmulas y datos técnicos cuando sea útil
-- Conectá los temas con la práctica real de obra cuando sea posible
-- Si hay preguntas de examen, generá 5 con respuestas detalladas
-- Respondé siempre en español rioplatense (Argentina)
-- Sé concisa pero completa`;
-
-let chatHistory = [];
-let activeMateriaIA = null;
-
-function initIA() {
-  buildMateriaBar();
-  checkApiKey();
-}
-
-function checkApiKey() {
-  const key = localStorage.getItem('anthropic_key');
-  if(!key) document.getElementById('apiKeyBanner').classList.add('show');
-}
-function saveApiKey() {
-  const v = document.getElementById('apiKeyInput').value.trim();
-  if(v.startsWith('sk-')) {
-    localStorage.setItem('anthropic_key', v);
-    document.getElementById('apiKeyBanner').classList.remove('show');
-  }
-}
-
-function buildMateriaBar() {
-  const el = document.getElementById('materiaBar');
-  el.innerHTML = `<button class="msel-btn ${activeMateriaIA===null?'active':''}" style="--color:var(--gold)" onclick="setMateriaIA(null)">Todas</button>`
-    + MATERIAS.map(m=>`<button class="msel-btn ${activeMateriaIA===m.id?'active':''}" style="--color:${m.color}" onclick="setMateriaIA(${m.id})">${m.icon} ${m.nombre.split(' ')[0]}</button>`).join('');
-}
-function setMateriaIA(id){ activeMateriaIA=id; buildMateriaBar(); }
-
-function getMateriaContext() {
-  if(!activeMateriaIA) return '';
-  const m = MATERIAS.find(x=>x.id===activeMateriaIA);
-  return m ? `\n[El estudiante está consultando sobre la materia: ${m.nombre}]` : '';
-}
-
-function quickPrompt(text) {
-  document.getElementById('iaInput').value = text;
-  goto('ia');
-  sendMessage();
-}
-
-function handleKey(e) {
-  if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendMessage(); }
-}
-function autoResize(el) {
-  el.style.height='auto';
-  el.style.height=Math.min(el.scrollHeight,120)+'px';
-}
-
-function clearChat() {
-  chatHistory=[];
-  const el=document.getElementById('iaMessages');
-  el.innerHTML=`<div class="msg">
-    <div class="msg-avatar">✦</div>
-    <div class="msg-bubble">Chat limpiado. ¿En qué querés trabajar ahora, Ivan?</div>
-  </div>`;
-}
-
-async function sendMessage() {
-  const input = document.getElementById('iaInput');
-  const text = input.value.trim();
-  if(!text) return;
-
-  const apiKey = localStorage.getItem('anthropic_key');
-  if(!apiKey){ document.getElementById('apiKeyBanner').classList.add('show'); return; }
-
-  appendMsg('user', text);
-  input.value=''; input.style.height='auto';
-  setLoading(true);
-
-  chatHistory.push({ role:'user', content: text + getMateriaContext() });
-
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version':'2023-06-01',
-        'anthropic-dangerous-direct-browser-access':'true'
-      },
-      body: JSON.stringify({
-        model:'claude-sonnet-4-20250514',
-        max_tokens:1500,
-        system: SYSTEM_PROMPT,
-        messages: chatHistory
-      })
-    });
-
-    if(!res.ok){
-      const err = await res.json();
-      throw new Error(err.error?.message || 'Error API');
-    }
-
-    const data = await res.json();
-    const reply = data.content[0]?.text || '(sin respuesta)';
-    chatHistory.push({ role:'assistant', content:reply });
-    appendMsg('assistant', reply);
-
-  } catch(e) {
-    appendMsg('assistant', `⚠️ Error: ${e.message}. Verificá tu API key o intentá de nuevo.`);
-  } finally {
-    setLoading(false);
-  }
-}
-
-function setLoading(on) {
-  document.getElementById('iaTyping').classList.toggle('show', on);
-  document.getElementById('iaSend').disabled = on;
-  scrollChat();
-}
-
-function appendMsg(role, text) {
-  const el = document.getElementById('iaMessages');
-  const isUser = role==='user';
-  const formatted = formatMarkdown(text);
-  el.insertAdjacentHTML('beforeend', `
-    <div class="msg ${isUser?'user':''}">
-      <div class="msg-avatar">${isUser?'👤':'✦'}</div>
-      <div class="msg-bubble">${formatted}</div>
-    </div>`);
-  scrollChat();
-}
-
-function scrollChat() {
-  const el=document.getElementById('iaMessages');
-  setTimeout(()=>{ el.scrollTop=el.scrollHeight; },50);
-}
-
-function formatMarkdown(text) {
-  return text
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/```([\s\S]*?)```/g,'<pre>$1</pre>')
-    .replace(/`([^`]+)`/g,'<code>$1</code>')
-    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g,'<em>$1</em>')
-    .replace(/^#{1,3}\s(.+)$/gm,'<strong style="color:var(--gold);display:block;margin-top:8px">$1</strong>')
-    .replace(/^[-•]\s(.+)$/gm,'<span style="display:block;padding-left:12px">· $1</span>')
-    .replace(/\n/g,'<br>');
-}
-
-// ── RECORDATORIOS ─────────────────────────────────
-let recordatorios = load('recordatorios', []);
-let recIntervals  = {};
-
-function initRecordatorios() {
-  populateRecMateriaSelect();
-  checkNotifPermission();
-  buildRecGrid();
-  startAllTimers();
-  // mostrar selector días al cambiar tipo
-  document.getElementById('recRepeat').addEventListener('change', function(){
-    document.getElementById('diasCheck').style.display = this.value==='personalizado' ? 'flex' : 'none';
-  });
-}
-
-function populateRecMateriaSelect() {
-  const sel = document.getElementById('recMateria');
-  sel.innerHTML = '<option value="">— Materia (opcional) —</option>'
-    + MATERIAS.map(m=>`<option value="${m.id}">${m.icon} ${m.nombre}</option>`).join('');
-}
-
-function checkNotifPermission() {
-  if(!('Notification' in window)) return;
-  if(Notification.permission === 'default') {
-    document.getElementById('permBanner').style.display = 'flex';
-  }
-}
-
-function pedirPermiso() {
-  Notification.requestPermission().then(p=>{
-    document.getElementById('permBanner').style.display = 'none';
-    if(p==='granted') mostrarBanner('🔔 Notificaciones activadas','¡Ahora vas a recibir tus recordatorios!');
-  });
-}
-
-function toggleRecForm() {
-  document.getElementById('recForm').classList.toggle('open');
-}
-
-function addRecordatorio() {
-  const msg    = document.getElementById('recMsg').value.trim();
-  const hora   = document.getElementById('recHora').value;
-  const repeat = document.getElementById('recRepeat').value;
-  const mid    = parseInt(document.getElementById('recMateria').value)||null;
-  if(!msg || !hora) return;
-
-  let dias = [];
-  if(repeat==='diario')     dias=[0,1,2,3,4,5,6];
-  else if(repeat==='laborable') dias=[1,2,3,4,5,6];
-  else if(repeat==='unico') dias=[new Date().getDay()];
-  else {
-    document.querySelectorAll('#diasCheck input:checked').forEach(cb=>dias.push(parseInt(cb.value)));
-    if(!dias.length) { alert('Seleccioná al menos un día'); return; }
-  }
-
-  const rec = { id:Date.now(), msg, hora, dias, repeat, materiaId:mid, activo:true };
-  recordatorios.unshift(rec);
-  save('recordatorios', recordatorios);
-  document.getElementById('recMsg').value='';
-  document.getElementById('recForm').classList.remove('open');
-  buildRecGrid();
-  startTimer(rec);
-}
-
-function deleteRec(id) {
-  clearInterval(recIntervals[id]);
-  delete recIntervals[id];
-  recordatorios = recordatorios.filter(r=>r.id!==id);
-  save('recordatorios', recordatorios);
-  buildRecGrid();
-}
-
-function toggleRec(id) {
-  const r = recordatorios.find(x=>x.id===id);
-  if(!r) return;
-  r.activo = !r.activo;
-  save('recordatorios', recordatorios);
-  if(r.activo) startTimer(r); else { clearInterval(recIntervals[id]); delete recIntervals[id]; }
-  buildRecGrid();
-}
-
-function buildRecGrid() {
-  const el = document.getElementById('recGrid');
-  if(!recordatorios.length) {
-    el.innerHTML='<div class="empty" style="grid-column:1/-1"><span>🔔</span>Sin recordatorios. Creá el primero.</div>';
-    return;
-  }
-  el.innerHTML = recordatorios.map(r=>{
-    const m = r.materiaId ? MATERIAS.find(x=>x.id===r.materiaId) : null;
-    const color = m ? m.color : 'var(--gold)';
-    const diasLabel = {diario:'Todos los días',laborable:'Lun–Sáb',unico:'Una vez',personalizado:
-      (r.dias||[]).map(d=>['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][d]).join(', ')}[r.repeat]||'';
-    return `<div class="rec-card" style="--color:${color}">
-      <div class="rc-header">
-        <div class="rc-time">⏰ ${r.hora}</div>
-        <div class="rc-dias">${diasLabel}</div>
-      </div>
-      <div class="rc-msg">${r.msg}</div>
-      ${m?`<div class="rc-mat">${m.icon} ${m.nombre}</div>`:''}
-      <div class="rc-actions">
-        <button class="rc-toggle ${r.activo?'on':''}" onclick="toggleRec(${r.id})">${r.activo?'✓ Activo':'Pausado'}</button>
-        <button class="rc-del" onclick="deleteRec(${r.id})">Eliminar</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-function startAllTimers() {
-  recordatorios.forEach(r=>{ if(r.activo) startTimer(r); });
-}
-
-function startTimer(rec) {
-  clearInterval(recIntervals[rec.id]);
-  recIntervals[rec.id] = setInterval(()=>checkFire(rec), 15000);
-  checkFire(rec); // check inmediato
-}
-
-function checkFire(rec) {
-  if(!rec.activo) return;
-  const now  = new Date();
-  const hoy  = now.getDay();
-  const hhmm = now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
-  if(!(rec.dias||[]).includes(hoy)) return;
-  if(hhmm !== rec.hora) return;
-
-  // Evitar doble disparo en el mismo minuto
-  const key = 'fired_'+rec.id+'_'+hhmm;
-  if(sessionStorage.getItem(key)) return;
-  sessionStorage.setItem(key,'1');
-
-  const m = rec.materiaId ? MATERIAS.find(x=>x.id===rec.materiaId) : null;
-  const titulo = m ? `${m.icon} ${m.nombre}` : '📚 Recordatorio de estudio';
-  dispararNotif(titulo, rec.msg);
-
-  // Si era único, desactivar
-  if(rec.repeat==='unico') { rec.activo=false; save('recordatorios',recordatorios); buildRecGrid(); }
-}
-
-function dispararNotif(titulo, cuerpo) {
-  // Banner in-app siempre
-  mostrarBanner(titulo, cuerpo);
-  // Push si hay permiso
-  if('Notification' in window && Notification.permission==='granted') {
-    new Notification(titulo, { body:cuerpo, icon:'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>' });
-  }
-}
-
-function mostrarBanner(titulo, cuerpo) {
-  document.getElementById('notifTitle').textContent = titulo;
-  document.getElementById('notifBody').textContent  = cuerpo;
-  const b = document.getElementById('notifBanner');
-  b.classList.add('show');
-  setTimeout(()=>b.classList.remove('show'), 6000);
-}
-
-function cerrarBanner() {
-  document.getElementById('notifBanner').classList.remove('show');
-}
-
-// ── SWIPE NAVIGATION ─────────────────────────────
-(function(){
-  const SECTIONS = ['dashboard','agenda','tps','notas','recordatorios'];
-  let touchX = 0;
-  document.addEventListener('touchstart', e=>{ touchX = e.touches[0].clientX; }, {passive:true});
-  document.addEventListener('touchend', e=>{
-    const dx = e.changedTouches[0].clientX - touchX;
-    if(Math.abs(dx) < 60) return;
-    const idx = SECTIONS.indexOf(currentSection);
-    if(dx < 0 && idx < SECTIONS.length-1) goto(SECTIONS[idx+1]);
-    if(dx > 0 && idx > 0) goto(SECTIONS[idx-1]);
-  }, {passive:true});
-})();
-
-// ── PWA INSTALL PROMPT ────────────────────────────
-let deferredPrompt;
-window.addEventListener('beforeinstallprompt', e=>{
-  e.preventDefault(); deferredPrompt=e;
-  // Mostrar hint sutil en dashboard
-  const hint = document.getElementById('installHint');
-  if(hint) hint.style.display='flex';
-});
-function instalarPWA(){
-  if(!deferredPrompt) return;
-  deferredPrompt.prompt();
-  deferredPrompt.userChoice.then(()=>{ deferredPrompt=null; document.getElementById('installHint').style.display='none'; });
-}
-
-// ── START ─────────────────────────────────────────
-init();
-initIA();
-initRecordatorios();
 </script>
 </body>
 </html>
